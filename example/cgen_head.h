@@ -1,269 +1,300 @@
 #include <memory>
 #include <cassert>
 #include <cmath>
-
-
-// struct Mat
-// {
-//     float * ptr;
-//     int h;
-//     int w;
-//     float & operator()(int i, int j) { return ptr[i*w + j]; }
-// };
-
-// struct Vec
-// {
-//     float * ptr;
-//     int w;
-//     float & operator()(int i) { return ptr[i]; }
-//     float & operator[](int i) { return ptr[i]; }
-// };
-
-
-// void gemv(Vec l, Mat r, Vec out)
-// {
-//     constexpr int T = 16;
-
-//     assert(l.w == r.h);
-//     assert(r.w == out.w);
-//     assert(r.w % T == 0);
-
-//     for(int t = 0 ; t < r.w ; t += T)
-//     {
-//         for(int j = t ; j < t+T ; j++)
-//             out[j] = 0;
-//         for(int i = 0 ; i < r.h ; i++)
-//             for(int j = t ; j < t+T ; j++)
-//                 out[j] += l[i] * r(i,j);
-//     }
-// }
-
-template<int S>
-struct BFloat16Blob
-{
-    uint16_t data[S];
-};
-
-struct Zero {};
-
-
-template<int H, int W>
-struct Mat
-{
-    float data[H][W];
-    
-    Mat() {}
-    Mat(Zero const&)
-    {
-        for(int i=0 ; i<H ; i++)
-            for(int j=0 ; j<W; j++)
-                data[i][j] = 0;
-    }
-    template<int S>
-    Mat(BFloat16Blob<S> & blob, int offset)
-    {
-        for(int i=0 ; i<H ; i++)
-            for(int j=0 ; j<W; j++)
-            {
-                int LE = 1; // not portable
-                uint16_t * dst = reinterpret_cast<uint16_t*>(&data[i][j]);
-                dst[LE] = blob.data[offset++];
-            }
-    }
-    auto & operator()(int i) { return data[i]; }
-    auto & operator[](int i) { return data[i]; }
-    auto const& operator()(int i) const { return data[i]; }
-    auto const& operator[](int i) const { return data[i]; }
-};
-
-template<int W>
-struct Vec
-{
-    float data[W];
-    
-    Vec() {}
-    Vec(Zero const&)
-    {
-        for(int j=0 ; j<W; j++)
-            data[j] = 0;
-    }
-    template<int S>
-    Vec(BFloat16Blob<S> & blob, int offset)
-    {
-        for(int j=0 ; j<W; j++)
-        {
-            int LE = 1; // not portable
-            uint16_t * dst = reinterpret_cast<uint16_t*>(&data[j]);
-            dst[LE] = blob.data[offset++];
-        }
-    }
-    float & operator()(int i) { return data[i]; }
-    float & operator[](int i) { return data[i]; }
-    float const& operator()(int i) const { return data[i]; }
-    float const& operator[](int i) const { return data[i]; }
-};
-
-float fastexp(float x)
-{
-    // TODO
-    return std::exp(x);
-}
-
-struct RNG
-{
-    uint64_t x = 1234567890;
-
-    float operator()()
-    {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        return (x % 100000) / float(100000);
-    }
-};
-
-template<int W>
-struct Sampler
-{
-    Vec<W> const& input;
-    Vec<W> x;
-    RNG rng;
-
-    int operator()()
-    {
-        float sum_exp = 0;
-        for(int i=0 ; i<W ; i++)
-        {
-            x[i] = (input[i] > -40) ? fastexp(input[i]) : 0;
-            sum_exp += x[i];
-        }
-        float sample = rng() * sum_exp;
-        float cumprob = 0;
-        for(int i=0 ; i<W ; i++)
-        {
-            cumprob += x[i];
-            if(cumprob > sample) { return i; }
-        }
-        return W-1;
-    }
-};
-
-template<int H, int W>
-struct Embed
-{
-    Mat<H, W> & weight;
-    Vec<W> out;
-
-    void operator()(int tok)
-    {
-        for(int i=0 ; i<W ; i++)
-            out[i] = weight.data[tok][i];
-    }
-};
-
-template<int W>
-struct VecAdd
-{
-    Vec<W> & l;
-    Vec<W> & r;
-    Vec<W> out;
-
-    void operator()()
-    {
-        for(int i=0 ; i<W ; i++)
-            out[i] = l[i] + r[i];
-    }
-};
-
-
-
-template<int W>
-struct VecMul
-{
-    Vec<W> & l;
-    Vec<W> & r;
-    Vec<W> out;
-
-    void operator()()
-    {
-        for(int i=0 ; i<W ; i++)
-            out[i] = l[i] * r[i];
-    }
-};
-
-template<int W>
-struct VecMulAdd
-{
-    Vec<W> & x;
-    Vec<W> & s;
-    Vec<W> & b;
-    Vec<W> out;
-
-    void operator()()
-    {
-        for(int i=0 ; i<W ; i++)
-            out[i] = x[i] * s[i] + b[i];
-    }
-};
-
-template<int H, int W>
-struct VecMat
-{
-    static constexpr int T = 16;
-    static_assert(W % T == 0, "");
-
-    Vec<H> const& x;
-    Mat<H, W> const& m;
-    Vec<W> out;
-
-    void operator()()
-    {
-        for(int t = 0 ; t < W ; t += T)
-        {
-            for(int j = t ; j < t+T ; j++)
-                out[j] = 0;
-            for(int i = 0 ; i < H ; i++)
-                for(int j = t ; j < t+T ; j++)
-                    out[j] += x[i] * m.data[i][j];
-        }
-    }
-};
-
-
-template<int H, int W>
-struct VecMatBias
-{
-    static constexpr int T = 16;
-    static_assert(W % T == 0, "");
-
-    Vec<H> const& x;
-    Mat<H, W> const& m;
-    Vec<W> const& b;
-    Vec<W> out;
-
-    void operator()()
-    {
-        for(int t = 0 ; t < W ; t += T)
-        {
-            for(int j = t ; j < t+T ; j++)
-                out[j] = b[j];
-            for(int i = 0 ; i < H ; i++)
-                for(int j = t ; j < t+T ; j++)
-                    out[j] += x[i] * m.data[i][j];
-        }
-    }
-};
-
+#include <tuple>
 
 namespace ml {
 
+struct bfloat16 { uint16_t data; };
 
-template<int W>
-void add(Vec<W> & out, Vec<W> const& l, Vec<W> const& r)
+
+// only a truly insane person would write a tensor math library
+// using c++ template metaprogramming
+
+
+template<int... dims>
+struct tensor;
+
+
+template<int dim0, int... dims>
+struct tensor<dim0, dims...>
 {
-    for(int i=0 ; i<W ; i++)
-        out[i] = l[i] * r[i];
+    using SubT = tensor<dims...>;
+
+    template<int D>
+    using StackT = tensor<D, dim0, dims...>;
+
+    SubT data[dim0];
+
+    tensor() {}
+    tensor(bfloat16 const* src)
+    {
+        // little endian only!!!
+        uint16_t * bf = reinterpret_cast<uint16_t*>(ptr());
+        for(int i=0 ; i<numel() ; i++)
+        {
+            // bf[i * 2 + 0] = 1<<15;
+            bf[i * 2 + 1] = src[i].data;
+        }
+    }
+    static constexpr int numel()
+    {
+        return dim0 * SubT::numel();
+    }
+    SubT & operator[](int i) { return data[i]; }
+    SubT const& operator[](int i) const { return data[i]; }
+    float item() const { return data[0].item(); }
+    float * ptr() { return reinterpret_cast<float*>(&data); }
+    float const* ptr() const { return reinterpret_cast<float const*>(&data); }
+};
+
+template<>
+struct tensor<>
+{
+    float f = 0;
+
+    tensor() {}
+    static constexpr int numel() { return 1; }
+    float item() const { return f; }
+    operator float() const { return f; }
+    tensor<> & operator=(float x) { f=x; return *this; }
+    tensor<> & operator+=(float x) { f+=x; return *this; }
+};
+
+
+
+
+template<int... Sx>
+struct slice {};
+
+template<int... dims>
+auto getitem(tensor<dims...> & x)
+{
+    return x;
+}
+
+template<int dim0, int... dims, int... Sx, class... Slices>
+auto getitem(tensor<dim0, dims...> & x, slice<Sx...> s, Slices... sss)
+{
+    static_assert(sizeof...(Sx) == 0, "not implemented yet");
+    
+    using OutT = typename decltype(getitem(x[0], sss...))::StackT<dim0>;
+    OutT out;
+    for(int i=0 ; i<dim0 ; i++)
+    {
+        out[i] = getitem(x[i], sss...);
+    }
+    return out;
+}
+
+template<int dim0, int... dims, class... Slices>
+auto getitem(tensor<dim0, dims...> & x, int i, Slices... sss)
+{
+    if(i < 0) i += dim0;
+    return getitem(x[i], sss...);
 }
 
 
+
+
+template<int H, int W>
+tensor<W> embedding(tensor<> const& x, tensor<H, W> const& m)
+{
+    return m[int(x.item())];
+}
+
+template<int dim0, int... dims, int H, int W>
+auto embedding(tensor<dim0, dims...> const& x, tensor<H, W> const& m)
+{
+    using OutT = typename decltype(embedding(x[0], m))::StackT<dim0>;
+    OutT out;
+    for(int i=0 ; i<dim0 ; i++)
+    {
+        out[i] = embedding(x[i], m);
+    }
+    return out;
+}
+
+
+
+template<int... dims>
+tensor<dims...> add(tensor<dims...> const& x, tensor<dims...> const& y)
+{
+    tensor<dims...> out;
+    for(int i=0 ; i<out.numel() ; i++)
+        out.ptr()[i] = x.ptr()[i] + y.ptr()[i];
+    return out;
+}
+
+template<int... dims>
+tensor<dims...> mul(tensor<dims...> const& x, tensor<dims...> const& y)
+{
+    tensor<dims...> out;
+    for(int i=0 ; i<out.numel() ; i++)
+        out.ptr()[i] = x.ptr()[i] * y.ptr()[i];
+    return out;
+}
+
+
+// https://github.com/ekmett/approximate/blob/master/cbits/fast.c
+float fast_exp(float x)
+{
+    union { float f; int32_t i; } p, n;
+    p.i = 1056478197 + 6051102 * x; // exp(x/2)
+    n.i = 1056478197 - 6051102 * x; // exp(-x/2)
+    return p.f / n.f;
+}
+
+float fast_sigmoid(float x)
+{
+    union { float f; int32_t i; } p, n;
+    p.i = 1056478197 + 6051102 * x; // exp(x/2)
+    n.i = 1056478197 - 6051102 * x; // exp(-x/2)
+    return p.f / (p.f + n.f);
+}
+
+float fast_tanh(float x)
+{
+    union { float f; int32_t i; } p, n;
+    p.i = 1064866805 + 12102203 * x; // exp(x)
+    n.i = 1064866805 - 12102203 * x; // exp(-x)
+    return (p.f - n.f) / (p.f + n.f);
+}
+
+float softsign(float x)
+{
+    return x / (std::abs(x) + 1); 
+}
+
+
+template<int... dims>
+tensor<dims...> sigmoid(tensor<dims...> const& x)
+{
+    tensor<dims...> out;
+    for(int i=0 ; i<out.numel() ; i++)
+        out.ptr()[i] = fast_sigmoid(x.ptr()[i]);
+    return out;
+}
+
+template<int... dims>
+tensor<dims...> softsign(tensor<dims...> const& x)
+{
+    tensor<dims...> out;
+    for(int i=0 ; i<out.numel() ; i++)
+        out.ptr()[i] = softsign(x.ptr()[i]);
+    return out;
+}
+
+
+template<int W>
+tensor<W> rms_norm(tensor<W> const& x, tensor<W> const& m, float eps)
+{
+    float norm = 0;
+    for(int i=0 ; i<W ; i++)
+        norm += x[i] * x[i];
+    norm = norm / W + eps;
+    norm = 1 / std::sqrt(norm);
+
+    tensor<W> out;
+    for(int i=0 ; i<W ; i++)
+        out[i] = norm * m[i] * x[i];
+    return out;
+}
+
+template<int dim0, int... dims, int W>
+auto rms_norm(tensor<dim0, dims...> const& x, tensor<W> const& m, float eps)
+{
+    using OutT = typename decltype(rms_norm(x[0], m, eps))::StackT<dim0>;
+    OutT out;
+    for(int i=0 ; i<dim0 ; i++)
+    {
+        out[i] = rms_norm(x[i], m, eps);
+    }
+    return out;
+}
+
+
+
+
+template<int H, int W>
+tensor<H> linear(tensor<W> const& x, tensor<H, W> const& m, nullptr_t const&)
+{
+    // static constexpr int T = 16;
+    // static_assert(W % T == 0, "");
+    tensor<H> out;
+    // TODO optimize
+    for(int i = 0 ; i < H ; i++)
+    {
+        out[i] = 0;
+        for(int j = 0 ; j < W ; j++)
+        {
+            out[i] += x[j].f * m[i][j].f;
+        }
+    }
+    return out;
+}
+template<int H, int W>
+tensor<H> linear(tensor<W> const& x, tensor<H, W> const& m, tensor<H> const& b)
+{
+    tensor<H> out;
+    // TODO optimize
+    for(int i = 0 ; i < H ; i++)
+    {
+        out[i] = b[i];
+        for(int j = 0 ; j < W ; j++)
+        {
+            out[i] += x[j] * m[i][j];
+        }
+    }
+    return out;
+}
+
+template<int dim0, int... dims, int H, int W, class Bias>
+auto linear(tensor<dim0, dims...> const& x, tensor<H, W> const& m, Bias const& b)
+{
+    using OutT = typename decltype(linear(x[0], m, b))::StackT<dim0>;
+    OutT out;
+    for(int i=0 ; i<dim0 ; i++)
+    {
+        out[i] = linear(x[i], m, b);
+    }
+    return out;
+}
+
+template<int T, int W>
+tensor<T, W> sqrll_kernel(
+    tensor<T, W> const& x,
+    tensor<T, W> const& r,
+    tensor<W> const& p)
+{
+    tensor<T, W> out;
+
+    for(int j=0 ; j<W; j++)
+        out[0][j] = x[0][j].f + r[0][j].f * p[j].f;
+    for(int t=1 ; t<T ; t++)
+        for(int j=0 ; j<W; j++)
+            out[t][j] = x[t][j].f + r[t][j].f * out[t-1][j].f;
+    
+    return out;
+}
+
+// compiler has trouble deducing dim0 if we use it for r and p
+template<int dim0, int... xdims, int... rdims, int... pdims>
+auto sqrll_kernel(
+    tensor<dim0, xdims...> const& x,
+    tensor<rdims...> const& r,
+    tensor<pdims...> const& p)
+{
+    using OutT = typename decltype(sqrll_kernel(x[0], r[0], p[0]))::StackT<dim0>;
+    OutT out;
+    for(int i=0 ; i<dim0 ; i++)
+    {
+        out[i] = sqrll_kernel(x[i], r[i], p[i]);
+    }
+    return out;
+}
+
 } // namespace ml
+
+
+

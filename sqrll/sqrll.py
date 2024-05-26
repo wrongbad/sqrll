@@ -169,7 +169,6 @@ class SqrllKernelCuda(torch.autograd.Function):
         return xg, rg, prevg
     
 
-@torch.fx.wrap
 def sqrll_kernel(x, r, prev=None):
     if x.is_cuda:
         return SqrllKernelCuda.apply(x, r, prev)
