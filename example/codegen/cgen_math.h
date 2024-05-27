@@ -46,6 +46,13 @@ struct tensor<dim0, dims...>
     float item() const { return data[0].item(); }
     float * ptr() { return reinterpret_cast<float*>(&data); }
     float const* ptr() const { return reinterpret_cast<float const*>(&data); }
+
+    tensor & zero_()
+    {
+        for(int i=0 ; i<numel() ; i++)
+            ptr()[i] = 0;
+        return *this;
+    }
 };
 
 template<>
@@ -59,6 +66,12 @@ struct tensor<>
     operator float() const { return f; }
     tensor<> & operator=(float x) { f=x; return *this; }
     tensor<> & operator+=(float x) { f+=x; return *this; }
+
+    tensor & zero_()
+    {
+        f = 0;
+        return *this;
+    }
 };
 
 
@@ -78,7 +91,7 @@ auto getitem(tensor<dim0, dims...> & x, slice<Sx...> s, Slices... sss)
 {
     static_assert(sizeof...(Sx) == 0, "not implemented yet");
     
-    using OutT = typename decltype(getitem(x[0], sss...))::StackT<dim0>;
+    using OutT = typename decltype(getitem(x[0], sss...))::template StackT<dim0>;
     OutT out;
     for(int i=0 ; i<dim0 ; i++)
     {
@@ -106,7 +119,7 @@ tensor<W> embedding(tensor<> const& x, tensor<H, W> const& m)
 template<int dim0, int... dims, int H, int W>
 auto embedding(tensor<dim0, dims...> const& x, tensor<H, W> const& m)
 {
-    using OutT = typename decltype(embedding(x[0], m))::StackT<dim0>;
+    using OutT = typename decltype(embedding(x[0], m))::template StackT<dim0>;
     OutT out;
     for(int i=0 ; i<dim0 ; i++)
     {
@@ -140,24 +153,24 @@ tensor<dims...> mul(tensor<dims...> const& x, tensor<dims...> const& y)
 float fast_exp(float x)
 {
     union { float f; int32_t i; } p, n;
-    p.i = 1056478197 + 6051102 * x; // exp(x/2)
-    n.i = 1056478197 - 6051102 * x; // exp(-x/2)
+    p.i = 1056478197 + int32_t(6051102 * x); // exp(x/2)
+    n.i = 1056478197 - int32_t(6051102 * x); // exp(-x/2)
     return p.f / n.f;
 }
 
 float fast_sigmoid(float x)
 {
     union { float f; int32_t i; } p, n;
-    p.i = 1056478197 + 6051102 * x; // exp(x/2)
-    n.i = 1056478197 - 6051102 * x; // exp(-x/2)
+    p.i = 1056478197 + int32_t(6051102 * x); // exp(x/2)
+    n.i = 1056478197 - int32_t(6051102 * x); // exp(-x/2)
     return p.f / (p.f + n.f);
 }
 
 float fast_tanh(float x)
 {
     union { float f; int32_t i; } p, n;
-    p.i = 1064866805 + 12102203 * x; // exp(x)
-    n.i = 1064866805 - 12102203 * x; // exp(-x)
+    p.i = 1064866805 + int32_t(12102203 * x); // exp(x)
+    n.i = 1064866805 - int32_t(12102203 * x); // exp(-x)
     return (p.f - n.f) / (p.f + n.f);
 }
 
@@ -202,10 +215,9 @@ tensor<W> rms_norm(tensor<W> const& x, tensor<W> const& m, float eps)
 }
 
 template<int dim0, int... dims, int W>
-auto rms_norm(tensor<dim0, dims...> const& x, tensor<W> const& m, float eps)
+tensor<dim0, dims...> rms_norm(tensor<dim0, dims...> const& x, tensor<W> const& m, float eps)
 {
-    using OutT = typename decltype(rms_norm(x[0], m, eps))::StackT<dim0>;
-    OutT out;
+    tensor<dim0, dims...> out;
     for(int i=0 ; i<dim0 ; i++)
     {
         out[i] = rms_norm(x[i], m, eps);
@@ -252,7 +264,7 @@ tensor<H> linear(tensor<W> const& x, tensor<H, W> const& m, tensor<H> const& b)
 template<int dim0, int... dims, int H, int W, class Bias>
 auto linear(tensor<dim0, dims...> const& x, tensor<H, W> const& m, Bias const& b)
 {
-    using OutT = typename decltype(linear(x[0], m, b))::StackT<dim0>;
+    using OutT = typename decltype(linear(x[0], m, b))::template StackT<dim0>;
     OutT out;
     for(int i=0 ; i<dim0 ; i++)
     {
@@ -280,18 +292,58 @@ tensor<T, W> sqrll_kernel(
 
 // compiler has trouble deducing dim0 if we use it for r and p
 template<int dim0, int... xdims, int... rdims, int... pdims>
-auto sqrll_kernel(
+tensor<dim0, xdims...> sqrll_kernel(
     tensor<dim0, xdims...> const& x,
     tensor<rdims...> const& r,
     tensor<pdims...> const& p)
 {
-    using OutT = typename decltype(sqrll_kernel(x[0], r[0], p[0]))::StackT<dim0>;
-    OutT out;
+    tensor<dim0, xdims...> out;
     for(int i=0 ; i<dim0 ; i++)
     {
         out[i] = sqrll_kernel(x[i], r[i], p[i]);
     }
     return out;
+}
+
+
+
+struct rng64
+{
+    uint64_t x = 1234567890;
+
+    float operator()()
+    {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        return (x % int(1e6)) / 1e6;
+    }
+};
+
+int sample_(float * x, int n, ml::rng64 & rng, float temperature=1)
+{
+    if(temperature == 0)
+    {
+        int out = 0;
+        for(int i=0 ; i<n ; i++)
+            if(x[i] > x[out]) out=i;
+        return out;
+    }
+
+    float sum_exp = 0;
+    for(int i=0 ; i<n ; i++)
+    {
+        x[i] = (x[i] > -40) ? ml::fast_exp(x[i] * temperature) : 0;
+        sum_exp += x[i];
+    }
+    float thresh = rng() * sum_exp;
+    float cumprob = 0;
+    for(int i=0 ; i<n ; i++)
+    {
+        cumprob += x[i];
+        if(cumprob > thresh) { return i; }
+    }
+    return n-1;
 }
 
 } // namespace ml
