@@ -16,20 +16,20 @@ class RmsNorm(torch.nn.Module):
         return rms_norm(x, self.weight, self.eps)
     
 
-class SqrllGate(torch.nn.Module):
+class SqrllLayer(torch.nn.Module):
     def __init__(self, n_in, n_mem, n_out):
         super().__init__()
-        self.wf = torch.nn.Linear(n_in, n_mem)
+        self.wr = torch.nn.Linear(n_in, n_mem)
         self.wi = torch.nn.Linear(n_in, n_mem, bias=False)
         self.wig = torch.nn.Linear(n_in, n_mem)
         self.wog = torch.nn.Linear(n_in, n_mem)
         self.wo = torch.nn.Linear(n_mem, n_out, bias=False)
 
     def forward(self, x, mem=None):
-        y = self.wi(x) * self.wig(x).sigmoid()
-        r = self.wf(x).sigmoid()
+        r = self.wr(x).sigmoid()
+        x = self.wi(x) * self.wig(x).sigmoid()
 
-        y = sqrll_kernel(y, r, mem)
+        y = sqrll_kernel(x, r, mem)
         mem = y[:,-1].detach().clone()
         
         y = torch.nn.functional.softsign(y)
@@ -60,7 +60,7 @@ class SqrllResid(torch.nn.Module):
     def __init__(self, n_embed, n_mem, n_ffn=0, dropout=0.1):
         super().__init__()
         self.norm = RmsNorm(n_embed)
-        self.sqrll = SqrllGate(n_embed, n_mem, n_embed)
+        self.sqrll = SqrllLayer(n_embed, n_mem, n_embed)
         self.dropout = torch.nn.Dropout(p=dropout)
         if n_ffn:
             self.ffn = SqrllFFN(n_embed, n_mem, dropout=dropout)
