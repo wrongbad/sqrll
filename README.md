@@ -19,21 +19,22 @@ Taking inspiration from LSTM and RetNet, I added more "gates" to the sqrll layer
 class SqrllLayer(torch.nn.Module):
     def __init__(self, n_in, n_mem, n_out):
         super().__init__()
-        self.wf = torch.nn.Linear(n_in, n_mem)
+        self.wr = torch.nn.Linear(n_in, n_mem)
         self.wi = torch.nn.Linear(n_in, n_mem, bias=False)
         self.wig = torch.nn.Linear(n_in, n_mem)
         self.wog = torch.nn.Linear(n_in, n_mem)
         self.wo = torch.nn.Linear(n_mem, n_out, bias=False)
 
     def forward(self, x, mem=None):
-        r = self.wf(x).sigmoid()
+        og = self.wog(x).sigmoid()
+        r = self.wr(x).sigmoid()
         x = self.wi(x) * self.wig(x).sigmoid()
 
         y = sqrll_kernel(x, r, mem)
         mem = y[:,-1].detach().clone()
         
         y = torch.nn.functional.softsign(y)
-        y = y * self.wog(x).sigmoid()
+        y = y * og
         y = self.wo(y)
 
         return y, mem
@@ -46,3 +47,13 @@ The original QRNN paper described a model alternating QRNN kernel and convolutio
 I decided instead of start fresh here and follow the pattern of Transformers with all layers in residual side branches, and include up-projection MLP layers.
 
 I also added a hyperparameter to insert MLP layers once every N `sqrll` layers, which can reduce parameter count.
+
+### Torch to C++
+
+SqrLLM models can be converted to pure c++ code with no dependencies, inlining the weights as constants in the code (bfloat16 storage format).
+
+This means the model.cpp can be compiled to `WebAssembly` for example, where the file-size overhead beyond the weights is mere kilobytes!
+
+A Makefile is including showing how to compile for both command-line and web assembly.
+
+This component was designed in a general purpose way, using torch.fx to discover the model architecture. However only the bare minimal set of functions are implemented to get SqrLLM export working. Maybe some day I'll spend more time on it and break it out as a standalone tool.

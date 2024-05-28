@@ -26,6 +26,7 @@ class SqrllLayer(torch.nn.Module):
         self.wo = torch.nn.Linear(n_mem, n_out, bias=False)
 
     def forward(self, x, mem=None):
+        og = self.wog(x).sigmoid()
         r = self.wr(x).sigmoid()
         x = self.wi(x) * self.wig(x).sigmoid()
 
@@ -33,7 +34,7 @@ class SqrllLayer(torch.nn.Module):
         mem = y[:,-1].detach().clone()
         
         y = torch.nn.functional.softsign(y)
-        y = y * self.wog(x).sigmoid()
+        y = y * og
         y = self.wo(y)
 
         return y, mem
