@@ -108,27 +108,25 @@ class SqrllKernelCuda(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, r, prev=None):
         SqrllKernelCuda.prep(ctx)
-        T = x.shape[1]
-        assert T>=2, "not implemented for T < 2 steps"
 
         y = x.detach().clone()
         if prev is not None:
             y[:,0] += prev * r[:,0]
 
-
-        thrd = (1, min(512, y.shape[2]))
-        blkx = math.ceil(y.shape[0] / thrd[0])
-        blky = math.ceil(y.shape[2] / thrd[1])
-        kernel = SqrllKernelCuda.module.get_function(
-            f'sqrll_forward<{SqrllKernelCuda.type_map[y.dtype]}>')
-        
-
-        kernel((blkx, blky), thrd, (
-            y.data_ptr(), r.data_ptr(),
-            *y.shape,
-            *[y.stride(i) for i in range(3)],
-            *[r.stride(i) for i in range(3)],
-        ))
+        if x.shape[1] > 1:
+            tpb = 512
+            thrd = (1, min(tpb, y.shape[2]))
+            blkx = math.ceil(y.shape[0] / thrd[0])
+            blky = math.ceil(y.shape[2] / thrd[1])
+            kernel = SqrllKernelCuda.module.get_function(
+                f'sqrll_forward<{SqrllKernelCuda.type_map[y.dtype]}>')
+            
+            kernel((blkx, blky), thrd, (
+                y.data_ptr(), r.data_ptr(),
+                *y.shape,
+                *[y.stride(i) for i in range(3)],
+                *[r.stride(i) for i in range(3)],
+            ))
 
         ctx.save_for_backward(prev, r, y)
 
@@ -137,28 +135,30 @@ class SqrllKernelCuda(torch.autograd.Function):
     @staticmethod
     def backward(ctx, yg):
         SqrllKernelCuda.prep(ctx)
-        T = yg.shape[1]
-        assert T>=2, "not implemented for T < 2 steps"
-
         prev, r, y = ctx.saved_tensors
         
-        rg = torch.empty_like(r).contiguous()
-        xg = torch.empty_like(r).contiguous()
+        rg = torch.empty_like(y).contiguous()
+        xg = torch.empty_like(y).contiguous()
 
-        thrd = (1, min(512, y.shape[2]))
-        blkx = math.ceil(y.shape[0] / thrd[0])
-        blky = math.ceil(y.shape[2] / thrd[1])
-        kernel = SqrllKernelCuda.module.get_function(
-            f'sqrll_backward<{SqrllKernelCuda.type_map[y.dtype]}>')
+        if yg.shape[1] > 1:
+            tpb = 512
+            thrd = (1, min(tpb, y.shape[2]))
+            blkx = math.ceil(y.shape[0] / thrd[0])
+            blky = math.ceil(y.shape[2] / thrd[1])
+            kernel = SqrllKernelCuda.module.get_function(
+                f'sqrll_backward<{SqrllKernelCuda.type_map[y.dtype]}>')
 
-        kernel((blkx, blky), thrd, (
-            xg.data_ptr(), rg.data_ptr(),
-            yg.data_ptr(), y.data_ptr(), r.data_ptr(),
-            *y.shape,
-            *[yg.stride(i) for i in range(3)],
-            *[y.stride(i) for i in range(3)],
-            *[r.stride(i) for i in range(3)],
-        ))
+            kernel((blkx, blky), thrd, (
+                xg.data_ptr(), rg.data_ptr(),
+                yg.data_ptr(), y.data_ptr(), r.data_ptr(),
+                *y.shape,
+                *[yg.stride(i) for i in range(3)],
+                *[y.stride(i) for i in range(3)],
+                *[r.stride(i) for i in range(3)],
+            ))
+        else:
+            xg[:] = y
+            rg[:] = 0
 
         if prev is not None:
             rg[:,0] = prev * xg[:,0]

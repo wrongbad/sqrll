@@ -1,19 +1,26 @@
 from .sqrll import sqrll_kernel
+from dataclasses import dataclass
 import torch
 
 
-def rms_norm(x, weight, eps):
-    x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
-    return x * weight
+def rms_norm(x, weight, eps, dim=-1):
+    x = x * torch.rsqrt(x.pow(2).mean(dim=dim, keepdim=True) + eps)
+    if dim == -1:
+        x = x * weight
+    elif dim == -3:
+        x = x * weight[:, None, None]
+    return x
     
 class RmsNorm(torch.nn.Module):
-    def __init__(self, n_embed, eps=1e-6):
+    def __init__(self, n_embed, eps=1e-6, dim=-1):
         super().__init__()
         self.eps = eps
         self.weight = torch.nn.Parameter(torch.ones(n_embed))
+        self.dim = dim
 
     def forward(self, x):
-        return rms_norm(x, self.weight, self.eps)
+        return rms_norm(x, self.weight, self.eps, self.dim)
+
     
 
 class SqrllLayer(torch.nn.Module):
@@ -46,7 +53,7 @@ class SqrllFFN(torch.nn.Module):
         self.norm = RmsNorm(n_embed)
         self.wi = torch.nn.Linear(n_embed, n_ffn, bias=False)
         self.wg = torch.nn.Linear(n_embed, n_ffn)
-        self.wo = torch.nn.Linear(n_ffn, n_embed)
+        self.wo = torch.nn.Linear(n_ffn, n_embed, bias=False)
         self.dropout = torch.nn.Dropout(p=dropout)
 
     def forward(self, x):
@@ -64,36 +71,48 @@ class SqrllResid(torch.nn.Module):
         self.sqrll = SqrllLayer(n_embed, n_mem, n_embed)
         self.dropout = torch.nn.Dropout(p=dropout)
         if n_ffn:
+            self.ffnorm = RmsNorm(n_embed)
             self.ffn = SqrllFFN(n_embed, n_mem, dropout=dropout)
+            self.ffdrop = torch.nn.Dropout(p=dropout)
 
     def forward(self, x, mem=None):
         y = self.norm(x)
         y, mem = self.sqrll(y, mem)
         x = x + self.dropout(y)
         if hasattr(self, 'ffn'):
-            x = self.ffn(x)
+            y = self.ffnorm(x)
+            y = self.ffn(y)
+            x = x + self.ffdrop(y)
         return x, mem
 
 
+
+
+@dataclass
+class SqrllConfig:
+    n_tokens_in: int = 256
+    n_vector_in: int = 0
+    n_out: int = 256
+    n_embed: int = 1024
+    n_mem: int = 1024
+    n_layer: int = 16
+    n_ffn: int = 1024
+    ffn_rate: int = 4
+    dropout: float = 0.1
+
+
+
 class SqrllStack(torch.nn.Module):
-    def __init__(
-            self, 
-            n_embed = 1024,
-            n_mem = 1024,
-            n_layer = 16,
-            n_ffn = 1024,
-            ffn_rate = 4,
-            dropout = 0.1,
-            ):
+    def __init__(self, cfg: SqrllConfig):
         super().__init__()
         self.blocks = torch.nn.ModuleList([
             SqrllResid(
-                n_embed, 
-                n_mem,
-                n_ffn=(n_ffn if (l+1)%ffn_rate==0 else 0),
-                dropout=dropout,
+                cfg.n_embed, 
+                cfg.n_mem,
+                n_ffn=(cfg.n_ffn if (l+1)%cfg.ffn_rate==0 else 0),
+                dropout=cfg.dropout,
             )
-            for l in range(n_layer)
+            for l in range(cfg.n_layer)
         ])
 
     def forward(self, x, mem=None):
@@ -106,46 +125,44 @@ class SqrllStack(torch.nn.Module):
     
 
 class SqrLLM(torch.nn.Module):
-    def __init__(
-            self, 
-            n_in = 256,
-            n_out = 256,
-            n_embed = 1024,
-            n_mem = 1024,
-            n_layer = 16,
-            n_ffn = 1024,
-            ffn_rate = 4,
-            dropout = 0.1,
-            ):
+    def __init__(self, cfg: SqrllConfig):
         super().__init__()
-        self.w_in = torch.nn.Embedding(n_in, n_embed)
-        self.sqrll = SqrllStack(
-            n_embed, 
-            n_mem, 
-            n_layer, 
-            n_ffn,
-            ffn_rate,
-            dropout=dropout,
-        )
-        self.norm = RmsNorm(n_embed)
-        self.w_out = torch.nn.Linear(n_embed, n_out)
+        self.config = cfg
+        if cfg.n_tokens_in:
+            self.w_in_t = torch.nn.Embedding(cfg.n_tokens_in, cfg.n_embed)
+        if cfg.n_vector_in:
+            self.w_in_v = torch.nn.Linear(cfg.n_vector_in, cfg.n_embed)
+        self.sqrll = SqrllStack(cfg)
+        self.norm = RmsNorm(cfg.n_embed)
 
-    def forward(self, x, mem=None):
-        x = self.w_in(x)
+        # TODO gated MLP output layer?
+        self.w_out = torch.nn.Linear(cfg.n_embed, cfg.n_out, bias=False)
+
+    def forward(self, in_toks=None, in_vecs=None, in_raw=None, mem=None, return_embed=False):
+        x = []
+        if in_toks is not None:
+            x += [self.w_in_t(in_toks)]
+        if in_vecs is not None:
+            x += [self.w_in_v(in_vecs)]
+        if in_raw is not None:
+            x += [in_raw]
+        x = sum(x)
         x, mem = self.sqrll(x, mem)
         x = self.norm(x)
+        if return_embed:
+            return self.w_out(x), x, mem
         return self.w_out(x), mem
     
+    def save(self, filename):
+        model_dict = self.state_dict()
+        model_dict['config'] = self.config
+        torch.save(model_dict, filename)
 
-
-class StatefulWrapper(torch.nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        inputs = torch.tensor([[0]])
-        _, mem = model(inputs)
-        self.mem = [torch.zeros_like(m) for m in mem]
-
-    def forward(self, x):
-        x, self.mem = self.model(x, self.mem)
-        return x
+    @staticmethod
+    def load(filename):
+        model_dict = torch.load(filename)
+        model = SqrLLM(model_dict['config'])
+        del model_dict['config']
+        model.load_state_dict(model_dict)
+        return model
+    
