@@ -6,3 +6,6 @@ dependencies = [
     "cupy",
     "torch",
 ]
+
+[tool.setuptools]
+packages = ["sqrll"]

@@ -50,18 +50,14 @@ class SqrllLayer(torch.nn.Module):
 class SqrllFFN(torch.nn.Module):
     def __init__(self, n_embed, n_ffn, dropout=0.1):
         super().__init__()
-        self.norm = RmsNorm(n_embed)
         self.wi = torch.nn.Linear(n_embed, n_ffn, bias=False)
         self.wg = torch.nn.Linear(n_embed, n_ffn)
         self.wo = torch.nn.Linear(n_ffn, n_embed, bias=False)
-        self.dropout = torch.nn.Dropout(p=dropout)
 
     def forward(self, x):
-        y = self.norm(x)
-        y = self.wi(y) * self.wg(y).sigmoid()
+        y = self.wi(x) * self.wg(x).sigmoid()
         y = self.wo(y)
-        y = self.dropout(y)
-        return x + y
+        return y
     
 
 class SqrllResid(torch.nn.Module):
@@ -97,7 +93,7 @@ class SqrllConfig:
     n_mem: int = 1024
     n_layer: int = 16
     n_ffn: int = 1024
-    ffn_rate: int = 4
+    ffn_rate: int = 1
     dropout: float = 0.1
 
 
@@ -154,15 +150,19 @@ class SqrLLM(torch.nn.Module):
         return self.w_out(x), mem
     
     def save(self, filename):
-        model_dict = self.state_dict()
-        model_dict['config'] = self.config
+        model_dict = {
+            'config': self.config,
+            'weights': self.state_dict(),
+        }
         torch.save(model_dict, filename)
 
     @staticmethod
-    def load(filename):
+    def load(filename, **overrides):
         model_dict = torch.load(filename)
-        model = SqrLLM(model_dict['config'])
-        del model_dict['config']
-        model.load_state_dict(model_dict)
+        cfg = model_dict['config']
+        for k, v in overrides.items():
+            setattr(cfg, k, v)
+        model = SqrLLM(cfg)
+        model.load_state_dict(model_dict['weights'])
         return model
     
