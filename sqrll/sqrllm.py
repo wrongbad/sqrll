@@ -33,9 +33,10 @@ class SqrllLayer(torch.nn.Module):
         self.wo = torch.nn.Linear(n_mem, n_out, bias=False)
 
     def forward(self, x, mem=None):
+        ig = self.wig(x).sigmoid()
         og = self.wog(x).sigmoid()
         r = self.wr(x).sigmoid()
-        x = self.wi(x) * self.wig(x).sigmoid()
+        x = self.wi(x) * ig
 
         y = sqrll_kernel(x, r, mem)
         mem = y[:,-1].detach().clone()
@@ -48,7 +49,7 @@ class SqrllLayer(torch.nn.Module):
 
 
 class SqrllFFN(torch.nn.Module):
-    def __init__(self, n_embed, n_ffn, dropout=0.1):
+    def __init__(self, n_embed, n_ffn):
         super().__init__()
         self.wi = torch.nn.Linear(n_embed, n_ffn, bias=False)
         self.wg = torch.nn.Linear(n_embed, n_ffn)
@@ -68,7 +69,7 @@ class SqrllResid(torch.nn.Module):
         self.dropout = torch.nn.Dropout(p=dropout)
         if n_ffn:
             self.ffnorm = RmsNorm(n_embed)
-            self.ffn = SqrllFFN(n_embed, n_mem, dropout=dropout)
+            self.ffn = SqrllFFN(n_embed, n_mem)
             self.ffdrop = torch.nn.Dropout(p=dropout)
 
     def forward(self, x, mem=None):
@@ -149,10 +150,11 @@ class SqrLLM(torch.nn.Module):
             return self.w_out(x), x, mem
         return self.w_out(x), mem
     
-    def save(self, filename):
+    def save(self, filename, metadata=None):
         model_dict = {
             'config': self.config,
             'weights': self.state_dict(),
+            'meta': metadata,
         }
         torch.save(model_dict, filename)
 
